@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y \
     librdkafka-dev \
     && rm -rf /var/lib/apt/lists/*
 
+# Set the timezone
+ENV TZ=Europe/Berlin
+
 # Upgrade pip, setuptools, and wheel
 RUN pip install --upgrade pip setuptools wheel
 
@@ -27,5 +30,18 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the application code into the container
 COPY . .
 
+# Copy the config file into the container
+COPY config.yaml /app/config.yaml
+
+# Create logs directory
+RUN mkdir -p /app/logs
+
+# Create output directory
+RUN mkdir -p /app/output
+
+# Create an entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # Command to run the application
-CMD ["python", "people_counter.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]

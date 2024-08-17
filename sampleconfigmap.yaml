@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: camera-config
+data:
+  config.yaml: |
+    kafka:
+      bootstrap_servers: broker:port
+      security_protocol: SASL_SSL
+      sasl_mechanisms: PLAIN
+      sasl_username: username
+      sasl_password: password
+    cameras:
+      - name: camera_1
+        rtsp_link: rtsp://user:pw@ip_address/stream1
+        kafka_topic: the.topic.you.want.to.write.in
+        detection_line: 0.5
+        fps: 15
+        camera_position: camera_position
+      - name: camera_2
+        rtsp_link: rtsp://user:pw@ip_address/stream1
+        kafka_topic: the.topic.you.want.to.write.in
+        detection_line: 0.5
+        fps: 15
+        camera_position: camera_position
+      - name: camera_3
+        rtsp_link: rtsp://user:pw@ip_address/stream1
+        kafka_topic: the.topic.you.want.to.write.in
+        detection_line: 0.5
+        fps: 15
+        camera_position: camera_position
+    #add more cameras if you like
+    logging:
+      level: INFO
+      file: /app/logs/app.logs

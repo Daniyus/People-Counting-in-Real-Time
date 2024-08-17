@@ -1,8 +1,12 @@
+import sys
+import os
 import cv2
-import argparse
+import yaml
 import logging
 from confluent_kafka import Producer
 import numpy as np
+import json
+import time
 
 # Load pre-trained object detection model (e.g., MobileNet SSD or YOLO)
 model_path = "detector/MobileNetSSD_deploy.caffemodel"
@@ -15,15 +19,16 @@ PERSON_CLASS_ID = 15  # For MobileNet SSD, 15 is the class ID for 'person'
 
 
 # Kafka producer configuration with SASL/SSL
-def kafka_producer_config(broker, username, password):
+def kafka_producer_config(config):
     try:
         conf = {
-            'bootstrap.servers': broker,
-            'security.protocol': 'SASL_SSL',
-            'sasl.mechanisms': 'PLAIN',
-            'sasl.username': username,
-            'sasl.password': password,
-            'client.id': 'people_counting_client',
+            'bootstrap.servers': config['bootstrap_servers'],
+            'security.protocol': config['security_protocol'],
+            'sasl.mechanisms': config['sasl_mechanisms'],
+            'sasl.username': config['sasl_username'],
+            'sasl.password': config['sasl_password'],
+            'client.id': 'people_counting_client'
+            # 'debug': 'broker,topic,msg'
         }
         return Producer(**conf)
     except Exception as e:
@@ -31,10 +36,21 @@ def kafka_producer_config(broker, username, password):
         return None
 
 
+# Function to create the data according to Kafka Topic Schema
+def build_kafka_message(camera_position, change):
+    message = {
+        #"cameraPosition": camera_position,
+        #"timestamp": int(time.time()),
+        "change": change
+    }
+    return json.dumps(message)
+
+
 # Function to send data to Kafka
-def send_to_kafka(producer, topic, key, value):
+def send_to_kafka(producer, topic, position, change):
     try:
-        producer.produce(topic, key=key, value=value)
+        message = build_kafka_message(position, change)
+        producer.produce(topic, key=str(position).encode('utf-8'), value=message)
         producer.flush()
     except Exception as e:
         logging.error(f"Failed to send message to Kafka: {e}")
@@ -63,7 +79,7 @@ def detect_persons(frame):
 
 
 # Function to process a single RTSP stream
-def process_rtsp(rtsp_url, fps, kafka_producer=None, kafka_topic=None):
+def process_rtsp(rtsp_url, fps, detection_line, kafka_producer=None, kafka_topic=None, position=None):
     cap = cv2.VideoCapture(rtsp_url)
     if not cap.isOpened():
         logging.error(f"Error opening RTSP stream: {rtsp_url}")
@@ -76,7 +92,7 @@ def process_rtsp(rtsp_url, fps, kafka_producer=None, kafka_topic=None):
 
     frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    line_y = frame_height // 2  # Draw a line in the middle of the frame
+    line_y = int(frame_height * detection_line)
 
     frame_count = 0
 
@@ -102,40 +118,59 @@ def process_rtsp(rtsp_url, fps, kafka_producer=None, kafka_topic=None):
                     if previous_centroid[1] < line_y and centroid[1] >= line_y:  # Crossing the line from top to bottom
                         logging.info("Person entered the area (+1).")
                         if kafka_producer and kafka_topic:
-                            send_to_kafka(kafka_producer, kafka_topic, key='people_count', value=1)
+                            send_to_kafka(kafka_producer, kafka_topic, position, change=1)
                     elif previous_centroid[1] > line_y and centroid[
                         1] <= line_y:  # Crossing the line from bottom to top
                         logging.info("Person left the area (-1).")
                         if kafka_producer and kafka_topic:
-                            send_to_kafka(kafka_producer, kafka_topic, key='people_count', value=-1)
+                            send_to_kafka(kafka_producer, kafka_topic, position, change=-1)
 
         previous_centroids = current_centroids
 
-        cv2.imshow('Frame', frame)
-        if cv2.waitKey(int(1000 / original_fps)) & 0xFF == ord('q'):
-            logging.info("User interrupted the process.")
-            break
+        # Optional: save frames or output to a file instead of displaying them
+        # cv2.imwrite(f'/app/output/frame_{frame_count}.jpg', frame)
 
     cap.release()
     cv2.destroyAllWindows()
 
 
-def main(rtsp_urls, fps, kafka_broker, kafka_topic, kafka_username, kafka_password):
-    kafka_producer = kafka_producer_config(kafka_broker, kafka_username, kafka_password)
+def main(camera_name=None):
+    # Read config.yaml
+    with open('config.yaml', 'r') as file:
+        config = yaml.safe_load(file)
 
-    for rtsp_url in rtsp_urls:
-        logging.info(f"Processing RTSP stream: {rtsp_url}")
-        process_rtsp(rtsp_url, fps, kafka_producer, kafka_topic)
+    logging.basicConfig(level=config['logging']['level'],
+                        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                        handlers=[
+                            logging.FileHandler(config['logging']['file']),
+                            logging.StreamHandler()
+                        ])
+
+    kafka_producer = kafka_producer_config(config['kafka'])
+
+    camera_config = None
+    for camera in config['cameras']:
+        if camera['name'] == camera_name:
+            camera_config = camera
+            break
+
+    if camera_config is None:
+        logging.error(f"No camera configuration found for camera: {camera_name}")
+        return
+
+    # Extract detection_line and fps from the specific camera's configuration
+    fps = camera_config.get('fps', 15)
+    detection_line = camera_config.get('detection_line', 0.5)
+    camera_position = camera_config.get('camera_position', "no_position")
+
+    logging.info(f"Processing RTSP stream from camera: {camera_config['name']}")
+    process_rtsp(camera_config['rtsp_link'], fps, detection_line, kafka_producer,
+                 camera_config['kafka_topic'], camera_position)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description='Process RTSP streams and send people count changes to Kafka.')
-    parser.add_argument('--rtsp_urls', nargs='+', required=True, help='List of RTSP URLs to process')
-    parser.add_argument('--fps', type=int, default=30, help='Frames per second for processing')
-    parser.add_argument('--kafka_broker', type=str, required=True, help='Kafka broker address')
-    parser.add_argument('--kafka_topic', type=str, required=True, help='Kafka topic to send people count')
-    parser.add_argument('--kafka_username', type=str, required=True, help='Kafka SASL username')
-    parser.add_argument('--kafka_password', type=str, required=True, help='Kafka SASL password')
-    args = parser.parse_args()
-
-    main(args.rtsp_urls, args.fps, args.kafka_broker, args.kafka_topic, args.kafka_username, args.kafka_password)
+    camera_name = os.getenv("CAMERA_NAME")
+    if not camera_name:
+        print("CAMERA_NAME environment variable is not set.")
+        sys.exit(1)
+    main(camera_name)
